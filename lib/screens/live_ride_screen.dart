@@ -31,9 +31,6 @@ const _headerBlack = Color(0xFF15151B);
 // "one system" at a glance.
 const _streetPillPurple = Color(0xFF6E4CF0);
 
-// Hazard icon + upcoming-hazard panel accents.
-const _hazardYellow = Color(0xFFFFC53D);
-
 // Music FAB.
 const _musicPink = Color(0xFFFF3D81);
 
@@ -64,14 +61,13 @@ const _routePoints = [
   LatLng(14.2516, 120.8744),
 ];
 
-// Dummy turn-by-turn / trip / hazard copy — all swap for real routing +
+// Dummy turn-by-turn / trip copy — all swap for real routing +
 // telemetry data once Phase 8 (GPS) and Phase 10 (routing engine) land.
 // Kept as simple constants for now so the layout is easy to re-point later.
 const _turnDistance = '700 m';
 const _upcomingStreet = 'Jefferson Avenue';
 const _currentStreet = 'John St.';
 const _currentSpeedKmh = 60;
-const _hazardText = 'Speed bumps in 500 m';
 const _tripSummary = '48 min  •  10:29  •  12 mi';
 const _tripProgress = 0.42;
 
@@ -132,7 +128,11 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   @override
   void initState() {
     super.initState();
-    _simTimer = Timer.periodic(_simStepInterval, (_) => _advanceSimulatedPosition());
+    // Simulation timer disabled: this screen is for static UI prototyping
+    // only, so the rider position/heading no longer advance on their own.
+    // Re-enable this line (or swap it for the real position-stream
+    // listener per the comments above) once movement is wanted again.
+    // _simTimer = Timer.periodic(_simStepInterval, (_) => _advanceSimulatedPosition());
   }
 
   @override
@@ -146,6 +146,12 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   // map to match. This is what keeps the map "always pointing the
   // direction the rider should go" instead of rotating once at load and
   // freezing.
+  //
+  // Currently unused: the timer that called this on a loop was disabled in
+  // initState() for static UI prototyping. Left in place (rather than
+  // deleted) since it's also the template for the real GPS/heading stream
+  // handler once Phase 8 lands.
+  // ignore: unused_element
   void _advanceSimulatedPosition() {
     if (_routeIndex >= _routePoints.length - 1) {
       // Loop back to the start so the demo keeps running. A real position
@@ -225,19 +231,34 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           //    further than panning near the bottom, since perspective
           //    foreshortens that area — a known quirk of this technique,
           //    not a bug
+          //  - the perspective coefficient (setEntry(3, 2, ...)) and the
+          //    oversized height below both have to stay small enough that
+          //    the farthest points never cross the "camera" plane. Past
+          //    that point, the perspective divide flips sign and anything
+          //    sitting up there — like the destination flag, which is the
+          //    farthest thing on screen in heading-up mode — renders as a
+          //    warped, folded-looking blob instead of just a small distant
+          //    icon. That's what a too-strong value here looks like.
           ClipRect(
             child: Transform(
               alignment: Alignment.center,
               transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.0018)
+                ..setEntry(3, 2, 0.0011)
                 ..rotateX(0.5), // ~29° forward pitch
               child: OverflowBox(
                 maxHeight: double.infinity,
+                maxWidth: double.infinity,
                 child: SizedBox(
-                  // Oversized so the perspective shrink doesn't leave a
-                  // visible gap above the "horizon".
-                  width: screenSize.width,
-                  height: screenSize.height * 1.8,
+                  // Oversized in both directions. The rotateX tilt turns
+                  // the map into a trapezoid — narrower at the top than
+                  // the bottom — so sizing this to exactly screenSize.width
+                  // left black wedges from the Scaffold showing through at
+                  // the top-left/top-right corners. Widening it (and
+                  // centering it via OverflowBox's default alignment)
+                  // pushes those trapezoid edges back out past the screen
+                  // bounds, and ClipRect above trims the rest.
+                  width: screenSize.width * 1.6,
+                  height: screenSize.height * 1.6,
                   child: FlutterMap(
                     mapController: _mapController,
                     options: MapOptions(
@@ -294,6 +315,12 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                             width: 26,
                             height: 26,
                             alignment: Alignment.topCenter,
+                            // rotate: false (flutter_map's default too, but
+                            // set explicitly here) means no counter-rotation
+                            // is applied, so this marker turns together with
+                            // the tiles whenever the map rotates, instead of
+                            // staying screen-locked upright.
+                            rotate: false,
                             child: const Icon(Icons.flag_circle, color: _routeLineColor, size: 26),
                           ),
                           Marker(
@@ -313,18 +340,23 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                             point: _groupPositions[0],
                             width: 34,
                             height: 34,
+                            // See the flag marker's comment above — rotates
+                            // with the map instead of staying screen-locked.
+                            rotate: false,
                             child: const _RiderPin(initials: 'JM', color: AppColors.route),
                           ),
                           Marker(
                             point: _groupPositions[1],
                             width: 34,
                             height: 34,
+                            rotate: false,
                             child: const _RiderPin(initials: 'KR', color: AppColors.pine),
                           ),
                           Marker(
                             point: _groupPositions[2],
                             width: 34,
                             height: 34,
+                            rotate: false,
                             child: const _RiderPin(initials: 'MT', color: AppColors.rust),
                           ),
                         ],
@@ -354,7 +386,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           // ---------------------------------------------------------------
           // RIGHT-SIDE CONTROLS — mic + music near the top, recenter
           // (large) and the north-reset escape hatch stacked near the
-          // bottom, clear of the hazard panel.
+          // bottom, clear of the trip panel.
           // ---------------------------------------------------------------
           Positioned(
             right: 16,
@@ -404,8 +436,8 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           ),
 
           // ---------------------------------------------------------------
-          // BOTTOM STACK — current-street pill, trip summary, hazard
-          // panel, then the existing ride-control actions underneath.
+          // BOTTOM STACK — current-street pill, trip summary panel, then
+          // the existing ride-control actions underneath.
           // ---------------------------------------------------------------
           SafeArea(
             top: false,
@@ -417,7 +449,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                   const Spacer(),
                   const _StreetPill(label: _currentStreet),
                   const SizedBox(height: 10),
-                  const _SpeedAndHazardRow(),
+                  const _SpeedAndTripRow(),
                   const SizedBox(height: 12),
                   const _RideActionBar(),
                 ],
@@ -528,11 +560,11 @@ class _StreetPill extends StatelessWidget {
 }
 
 // -----------------------------------------------------------------------
-// Speedometer (bottom-left) + trip summary / hazard panel (rest of width)
+// Speedometer (bottom-left) + trip summary panel (rest of width)
 // -----------------------------------------------------------------------
 
-class _SpeedAndHazardRow extends StatelessWidget {
-  const _SpeedAndHazardRow();
+class _SpeedAndTripRow extends StatelessWidget {
+  const _SpeedAndTripRow();
 
   @override
   Widget build(BuildContext context) {
@@ -541,7 +573,7 @@ class _SpeedAndHazardRow extends StatelessWidget {
       children: [
         const _Speedometer(speedKmh: _currentSpeedKmh),
         const SizedBox(width: 12),
-        const Expanded(child: _HazardPanel()),
+        const Expanded(child: _TripPanel()),
       ],
     );
   }
@@ -591,8 +623,8 @@ class _Speedometer extends StatelessWidget {
   }
 }
 
-class _HazardPanel extends StatelessWidget {
-  const _HazardPanel();
+class _TripPanel extends StatelessWidget {
+  const _TripPanel();
 
   @override
   Widget build(BuildContext context) {
@@ -635,33 +667,11 @@ class _HazardPanel extends StatelessWidget {
                     valueColor: const AlwaysStoppedAnimation(_routeLineColor),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 38,
-                        height: 38,
-                        decoration: BoxDecoration(
-                          color: _hazardYellow.withOpacity(0.18),
-                          shape: BoxShape.circle,
-                        ),
-                        alignment: Alignment.center,
-                        child: const Icon(Icons.warning_rounded, color: _hazardYellow, size: 22),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          _hazardText,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppText.body(
-                              size: 14.5, weight: FontWeight.w800, color: Colors.black87),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                // The hazard warning row ("Speed bumps in 500 m") that used
+                // to sit here has been removed — it's not part of this
+                // project. The white card is kept as a home for the trip
+                // progress bar above.
+                const SizedBox(height: 4),
               ],
             ),
           ),
@@ -673,7 +683,7 @@ class _HazardPanel extends StatelessWidget {
 
 // -----------------------------------------------------------------------
 // Ride action bar — unchanged behavior (pause / rest stop / end ride),
-// lightly restyled to sit under the new white hazard panel.
+// lightly restyled to sit under the new white trip panel.
 // -----------------------------------------------------------------------
 
 class _RideActionBar extends StatelessWidget {
