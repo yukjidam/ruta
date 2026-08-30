@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../theme/app_colors.dart';
@@ -186,9 +187,11 @@ class _AboutRutaDialog extends StatelessWidget {
                   size: 68,
                   background: Colors.white,
                   border: AppColors.paperLine,
-                  // App icon. Swap for Image.asset('assets/ruta_icon.png')
-                  // once the real launcher icon is in the project.
-                  child: const Icon(Icons.route_rounded, color: AppColors.route, size: 30),
+                  child: SvgPicture.asset(
+                    'assets/icon/ruta_icon.svg',
+                    width: 40,
+                    height: 40,
+                  ),
                 ),
                 const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 14),

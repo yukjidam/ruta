@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../main.dart';
 import '../theme/app_colors.dart';
@@ -25,21 +26,10 @@ class LoginScreen extends StatelessWidget {
                 style: IconButton.styleFrom(backgroundColor: AppColors.asphalt2),
               ),
               const SizedBox(height: 14),
-              Container(
+              SvgPicture.asset(
+                'assets/icon/ruta_icon.svg',
                 width: 56,
                 height: 56,
-                decoration: BoxDecoration(
-                  // Sampled from the reference icon (#F5B700) — move this
-                  // into AppColors as the official brand yellow whenever
-                  // you're ready to reuse it elsewhere.
-                  color: const Color(0xFFF5B700),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  'R',
-                  style: AppText.display(size: 28, color: AppColors.asphalt),
-                ),
               ),
               const SizedBox(height: 14),
               Text('Welcome\nback', style: AppText.display(size: 30)),
