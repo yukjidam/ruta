@@ -185,12 +185,24 @@ class _AboutRutaDialog extends StatelessWidget {
               children: [
                 _AboutAvatar(
                   size: 68,
-                  background: Colors.white,
+                  background: const Color(0xFFF5B700),
                   border: AppColors.paperLine,
-                  child: SvgPicture.asset(
-                    'assets/icon/ruta_icon.svg',
-                    width: 40,
-                    height: 40,
+                  child: ClipOval(
+                    child: SvgPicture.asset(
+                      'assets/icon/ruta_icon.svg',
+                      width: 64,
+                      height: 64,
+                      fit: BoxFit.cover,
+                      placeholderBuilder: (context) => const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      errorBuilder: (context, error, stackTrace) => Text(
+                        'R',
+                        style: AppText.display(size: 22, color: AppColors.darkInk),
+                      ),
+                    ),
                   ),
                 ),
                 const Padding(

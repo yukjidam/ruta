@@ -11,6 +11,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
 import '../widgets/app_button.dart';
+import '../widgets/ruta_map_layers.dart';
 
 /// Which field the next map tap should set.
 enum _PinMode { destination, meetup }
@@ -44,6 +45,12 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
   LatLng? _destination = const LatLng(14.1153, 120.9621); // Tagaytay Ridge
   LatLng? _meetup = const LatLng(14.2540, 121.1090); // Petron SLEX Sta. Rosa
 
+  // The text that actually matches where each pin currently sits — set
+  // whenever the pin moves (map tap or a chosen suggestion), so the
+  // fields can warn if their text has since drifted from that.
+  late String _destinationConfirmedText = _destinationController.text;
+  late String _meetupConfirmedText = _meetupController.text;
+
   _PinMode _mode = _PinMode.destination;
 
   @override
@@ -61,9 +68,11 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
       if (_mode == _PinMode.destination) {
         _destination = point;
         _destinationController.text = _formatLatLng(point);
+        _destinationConfirmedText = _destinationController.text;
       } else {
         _meetup = point;
         _meetupController.text = _formatLatLng(point);
+        _meetupConfirmedText = _meetupController.text;
       }
     });
   }
@@ -72,6 +81,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
     setState(() {
       _destination = suggestion.point;
       _mode = _PinMode.destination;
+      _destinationConfirmedText = _destinationController.text;
     });
     _mapController.move(suggestion.point, 15);
   }
@@ -80,6 +90,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
     setState(() {
       _meetup = suggestion.point;
       _mode = _PinMode.meetup;
+      _meetupConfirmedText = _meetupController.text;
     });
     _mapController.move(suggestion.point, 15);
   }
@@ -135,10 +146,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                   onTap: _handleMapTap,
                 ),
                 children: [
-                  TileLayer(
-                    urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                    userAgentPackageName: 'com.ruta.app',
-                  ),
+                  RutaMapLayers.tileLayer(),
                   MarkerLayer(
                     markers: [
                       if (_destination != null)
@@ -157,15 +165,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                         ),
                     ],
                   ),
-                  RichAttributionWidget(
-                    alignment: AttributionAlignment.bottomLeft,
-                    attributions: [
-                      TextSourceAttribution(
-                        'OpenStreetMap contributors',
-                        onTap: () {},
-                      ),
-                    ],
-                  ),
+                  RutaMapLayers.attribution(),
                 ],
               ),
             ),
@@ -205,6 +205,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                       hint: 'Search a place e.g. Market! Market! BGC',
                       accent: AppColors.route,
                       controller: _destinationController,
+                      confirmedText: _destinationConfirmedText,
                       onSelected: _handleDestinationSelected,
                       onActivated: _handleDestinationFieldActivated,
                     ),
@@ -214,6 +215,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                       hint: 'Search a place to meet the crew',
                       accent: AppColors.rust,
                       controller: _meetupController,
+                      confirmedText: _meetupConfirmedText,
                       onSelected: _handleMeetupSelected,
                       onActivated: _handleMeetupFieldActivated,
                     ),
@@ -232,8 +234,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                           height: 32,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            border: Border.all(
-                                color: AppColors.inkDim, width: 1.5, style: BorderStyle.solid),
+                            border: Border.all(color: AppColors.inkDim, width: 1.5),
                           ),
                           alignment: Alignment.center,
                           child: const Icon(Icons.add, size: 16, color: AppColors.inkDim),
@@ -357,6 +358,9 @@ class _LocationSearchField extends StatefulWidget {
   final String hint;
   final Color accent;
   final TextEditingController controller;
+  // The text that matches where the pin actually is right now. If the
+  // controller's text has drifted from this, the pin is stale.
+  final String confirmedText;
   final ValueChanged<_PlaceSuggestion> onSelected;
   final VoidCallback onActivated;
 
@@ -365,6 +369,7 @@ class _LocationSearchField extends StatefulWidget {
     required this.hint,
     required this.accent,
     required this.controller,
+    required this.confirmedText,
     required this.onSelected,
     required this.onActivated,
   });
@@ -378,6 +383,9 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
   Timer? _debounce;
   List<_PlaceSuggestion> _suggestions = [];
   bool _loading = false;
+  // True once a search has actually run and come back empty, so we can
+  // tell "haven't searched yet" apart from "searched, found nothing".
+  bool _searchedWithNoResults = false;
 
   @override
   void initState() {
@@ -396,6 +404,7 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
 
   void _onChanged(String value) {
     _debounce?.cancel();
+    setState(() => _searchedWithNoResults = false);
     if (value.trim().length < 3) {
       setState(() => _suggestions = []);
       return;
@@ -434,6 +443,7 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
               ),
             );
           }).toList();
+          _searchedWithNoResults = _suggestions.isEmpty;
         });
       }
     } catch (_) {
@@ -453,6 +463,9 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isStale =
+        widget.controller.text.isNotEmpty && widget.controller.text != widget.confirmedText;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -526,6 +539,41 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
                   ),
                 );
               }).toList(),
+            ),
+          )
+        else if (_searchedWithNoResults)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.asphalt2,
+              border: Border.all(color: AppColors.asphalt3),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.search_off, size: 16, color: AppColors.inkDim),
+                const SizedBox(width: 8),
+                Text('No places found', style: AppText.body(size: 12.5, color: AppColors.inkDim)),
+              ],
+            ),
+          )
+        else if (isStale)
+          // Field text has drifted from the last confirmed suggestion —
+          // the pin on the map hasn't moved to match it yet.
+          Padding(
+            padding: const EdgeInsets.only(top: 6, left: 2),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline, size: 13, color: AppColors.rust),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Pin is still at the last selected location — pick a result to move it.',
+                    style: AppText.body(size: 11, color: AppColors.inkDim),
+                  ),
+                ),
+              ],
             ),
           ),
       ],
