@@ -1,0 +1,34 @@
+name: Flutter CI
+
+# Runs static analysis and tests on every push/PR so a broken build
+# never lands on main. No secrets or .env needed since this pass is
+# UI-only — add SUPABASE_URL/etc as repo secrets here once the
+# backend work starts, passed via --dart-define or a CI-generated .env.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  analyze_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      # CI needs a .env file to exist for flutter_dotenv's asset bundling
+      # to succeed at build time — placeholder values are fine here since
+      # no widget reads them yet.
+      - name: Create placeholder .env for CI
+        run: cp .env.example .env
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

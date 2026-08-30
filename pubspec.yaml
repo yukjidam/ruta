@@ -1,0 +1,31 @@
+name: ruta
+description: "RUTA — a keepsake ride logbook app for motorcycle touring. UI-only build, no backend wired yet."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  # Used for the Anton / Work Sans / JetBrains Mono type system from the design pass.
+  # Downloads fonts at first run — swap for bundled font assets before going offline/production.
+  google_fonts: ^6.2.1
+  # Loads .env at startup so Supabase/R2/ORS keys are never hardcoded.
+  # Not read by any screen yet — this is UI-only — but wired up ready for the backend pass.
+  flutter_dotenv: ^5.1.0
+  flutter_map: ^8.3.2
+  latlong2: ^0.10.1
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env

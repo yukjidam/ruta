@@ -1,0 +1,18 @@
+# Normalize line endings across contributors on Windows/Mac/Linux.
+* text=auto eol=lf
+
+*.dart text
+*.yaml text
+*.yml text
+*.md text
+*.json text
+
+# Never diff generated/binary files as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.jks binary
+*.keystore binary
