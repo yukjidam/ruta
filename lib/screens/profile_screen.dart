@@ -87,7 +87,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         ),
                       )
                     else
-                      const SizedBox(width: 44),
+                      IconButton(
+                        onPressed: () => Navigator.pushNamed(context, AppRoutes.settings),
+                        icon: const Icon(Icons.settings_outlined, color: AppColors.darkInk),
+                      ),
                   ],
                 ),
               ),

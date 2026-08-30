@@ -5,7 +5,6 @@ import '../models/dummy_data.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
-import '../widgets/app_bottom_nav.dart';
 import '../widgets/ride_post_card.dart';
 
 class FeedScreen extends StatelessWidget {
@@ -65,7 +64,6 @@ class FeedScreen extends StatelessWidget {
         onPressed: () => Navigator.pushNamed(context, AppRoutes.planRide),
         child: const Icon(Icons.add, color: Colors.white),
       ),
-      bottomNavigationBar: const AppBottomNav(currentIndex: 0),
     );
   }
 }

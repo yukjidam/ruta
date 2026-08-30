@@ -4,7 +4,6 @@ import '../models/dummy_data.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
-import '../widgets/app_bottom_nav.dart';
 import '../widgets/stat_column.dart';
 
 class GarageScreen extends StatelessWidget {
@@ -28,7 +27,11 @@ class GarageScreen extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    const AppAvatar(initials: 'JM', color: AppColors.route, size: 56, textColor: AppColors.darkInk),
+                    const AppAvatar(
+                        initials: 'JM',
+                        color: AppColors.route,
+                        size: 56,
+                        textColor: AppColors.darkInk),
                     const SizedBox(width: 14),
                     Expanded(
                       child: Column(
@@ -69,7 +72,8 @@ class GarageScreen extends StatelessWidget {
                           Container(
                             width: 48,
                             height: 48,
-                            decoration: BoxDecoration(color: bike.color, borderRadius: BorderRadius.circular(10)),
+                            decoration: BoxDecoration(
+                                color: bike.color, borderRadius: BorderRadius.circular(10)),
                             alignment: Alignment.center,
                             child: const Icon(Icons.two_wheeler, color: Colors.white),
                           ),
@@ -77,9 +81,11 @@ class GarageScreen extends StatelessWidget {
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(bike.name, style: AppText.body(size: 14.5, weight: FontWeight.w700)),
+                              Text(bike.name,
+                                  style: AppText.body(size: 14.5, weight: FontWeight.w700)),
                               const SizedBox(height: 3),
-                              Text('${bike.year} · ${bike.odometer}', style: AppText.mono(size: 11.5)),
+                              Text('${bike.year} · ${bike.odometer}',
+                                  style: AppText.mono(size: 11.5)),
                             ],
                           ),
                         ],
@@ -94,7 +100,6 @@ class GarageScreen extends StatelessWidget {
           ),
         ),
       ),
-      bottomNavigationBar: const AppBottomNav(currentIndex: 1),
     );
   }
 }
@@ -116,7 +121,8 @@ class DottedAddBikeCard extends StatelessWidget {
           border: Border.all(color: AppColors.asphalt3, width: 1.5),
         ),
         alignment: Alignment.center,
-        child: Text('+ Register a motorcycle', style: AppText.mono(size: 12.5, color: AppColors.inkDim)),
+        child: Text('+ Register a motorcycle',
+            style: AppText.mono(size: 12.5, color: AppColors.inkDim)),
       ),
     );
   }

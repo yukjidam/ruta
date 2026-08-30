@@ -25,6 +25,23 @@ class LoginScreen extends StatelessWidget {
                 style: IconButton.styleFrom(backgroundColor: AppColors.asphalt2),
               ),
               const SizedBox(height: 14),
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  // Sampled from the reference icon (#F5B700) — move this
+                  // into AppColors as the official brand yellow whenever
+                  // you're ready to reuse it elsewhere.
+                  color: const Color(0xFFF5B700),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  'R',
+                  style: AppText.display(size: 28, color: AppColors.asphalt),
+                ),
+              ),
+              const SizedBox(height: 14),
               Text('Welcome\nback', style: AppText.display(size: 30)),
               const SizedBox(height: 8),
               Text(
@@ -45,13 +62,15 @@ class LoginScreen extends StatelessWidget {
                 alignment: Alignment.centerRight,
                 child: GestureDetector(
                   onTap: () => Navigator.pushNamed(context, AppRoutes.forgotPassword),
-                  child: Text('Forgot password?', style: AppText.mono(size: 11, color: AppColors.route)),
+                  child: Text('Forgot password?',
+                      style: AppText.mono(size: 11, color: AppColors.route)),
                 ),
               ),
               const SizedBox(height: 20),
               AppButton(
                 label: 'Log in',
-                onPressed: () => Navigator.pushNamedAndRemoveUntil(context, AppRoutes.feed, (route) => false),
+                onPressed: () =>
+                    Navigator.pushNamedAndRemoveUntil(context, AppRoutes.feed, (route) => false),
               ),
               const SizedBox(height: 16),
               Row(
@@ -86,7 +105,8 @@ class LoginScreen extends StatelessWidget {
                         const TextSpan(text: 'New here? '),
                         TextSpan(
                           text: 'Create a logbook',
-                          style: AppText.body(size: 12.5, color: AppColors.route, weight: FontWeight.w700),
+                          style: AppText.body(
+                              size: 12.5, color: AppColors.route, weight: FontWeight.w700),
                         ),
                       ],
                     ),

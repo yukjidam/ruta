@@ -6,10 +6,9 @@ import 'screens/onboarding_screen.dart';
 import 'screens/register_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/forgot_password_screen.dart';
-import 'screens/feed_screen.dart';
-import 'screens/garage_screen.dart';
-import 'screens/crew_screen.dart';
+import 'screens/home_shell.dart';
 import 'screens/profile_screen.dart';
+import 'screens/settings_screen.dart';
 import 'screens/search_screen.dart';
 import 'screens/plan_ride_screen.dart';
 import 'screens/lobby_screen.dart';
@@ -18,7 +17,6 @@ import 'screens/paused_ride_screen.dart';
 import 'screens/capture_memory_screen.dart';
 import 'screens/ride_summary_screen.dart';
 import 'screens/ride_detail_screen.dart';
-import 'screens/notifications_screen.dart';
 import 'screens/crew_ride_invite_screen.dart';
 
 void main() async {
@@ -41,6 +39,7 @@ class AppRoutes {
   static const garage = '/garage';
   static const crew = '/crew';
   static const profile = '/profile';
+  static const settings = '/settings';
   static const search = '/search';
   static const planRide = '/plan-ride';
   static const lobby = '/lobby';
@@ -68,10 +67,11 @@ class RutaApp extends StatelessWidget {
         AppRoutes.register: (_) => const RegisterScreen(),
         AppRoutes.login: (_) => const LoginScreen(),
         AppRoutes.forgotPassword: (_) => const ForgotPasswordScreen(),
-        AppRoutes.feed: (_) => const FeedScreen(),
-        AppRoutes.garage: (_) => const GarageScreen(),
-        AppRoutes.crew: (_) => const CrewScreen(),
+        AppRoutes.feed: (_) => const HomeShell(initialIndex: 0),
+        AppRoutes.garage: (_) => const HomeShell(initialIndex: 1),
+        AppRoutes.crew: (_) => const HomeShell(initialIndex: 2),
         AppRoutes.profile: (_) => const ProfileScreen(),
+        AppRoutes.settings: (_) => const SettingsScreen(),
         AppRoutes.search: (_) => const SearchScreen(),
         AppRoutes.planRide: (_) => const PlanRideScreen(),
         AppRoutes.lobby: (_) => const LobbyScreen(),
@@ -80,7 +80,7 @@ class RutaApp extends StatelessWidget {
         AppRoutes.captureMemory: (_) => const CaptureMemoryScreen(),
         AppRoutes.rideSummary: (_) => const RideSummaryScreen(),
         AppRoutes.rideDetail: (_) => const RideDetailScreen(),
-        AppRoutes.notifications: (_) => const NotificationsScreen(),
+        AppRoutes.notifications: (_) => const HomeShell(initialIndex: 3),
         AppRoutes.crewRideInvite: (_) => const CrewRideInviteScreen(),
       },
     );

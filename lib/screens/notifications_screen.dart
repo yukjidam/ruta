@@ -4,7 +4,6 @@ import '../main.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
-import '../widgets/app_bottom_nav.dart';
 import '../widgets/section_eyebrow.dart';
 
 enum _NotifType { invite, heart, comment }
@@ -125,7 +124,6 @@ class NotificationsScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const AppBottomNav(currentIndex: 3),
           ],
         ),
       ),

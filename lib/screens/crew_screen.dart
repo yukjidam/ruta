@@ -5,7 +5,6 @@ import '../models/dummy_data.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
-import '../widgets/app_bottom_nav.dart';
 
 class CrewScreen extends StatefulWidget {
   const CrewScreen({super.key});
@@ -125,7 +124,6 @@ class _CrewScreenState extends State<CrewScreen> {
           ],
         ),
       ),
-      bottomNavigationBar: const AppBottomNav(currentIndex: 2),
     );
   }
 }
