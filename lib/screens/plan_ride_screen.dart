@@ -1,17 +1,23 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
-import 'package:latlong2/latlong.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../main.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
 import '../widgets/app_avatar.dart';
 import '../widgets/app_button.dart';
-import '../widgets/ruta_map_layers.dart';
+import '../widgets/screen_marker.dart';
+
+// Free, open vector basemap — no API key, no account, no usage cap. Same
+// style as live_ride_screen.dart so the two screens' maps look consistent.
+// See openfreemap.org if a different look (liberty/bright/dark/fiord) or
+// self-hosting is ever wanted.
+const _mapStyleUrl = 'https://tiles.openfreemap.org/styles/positron';
 
 /// Which field the next map tap should set.
 enum _PinMode { destination, meetup }
@@ -31,7 +37,10 @@ class PlanRideScreen extends StatefulWidget {
 }
 
 class _PlanRideScreenState extends State<PlanRideScreen> {
-  final MapController _mapController = MapController();
+  // Unlike flutter_map's MapController (constructed directly),
+  // MapLibreMapController is handed to us via onMapCreated once the native
+  // map view is ready — so this starts null.
+  MapLibreMapController? _mapController;
 
   final TextEditingController _destinationController =
       TextEditingController(text: 'Tagaytay Ridge, Cavite');
@@ -53,6 +62,12 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
 
   _PinMode _mode = _PinMode.destination;
 
+  // Screen-pixel positions for the two pin marker widgets — see
+  // widgets/screen_marker.dart for why these exist instead of a
+  // flutter_map-style MarkerLayer. Null until the first lookup completes.
+  math.Point<double>? _destinationScreenPoint;
+  math.Point<double>? _meetupScreenPoint;
+
   @override
   void dispose() {
     _destinationController.dispose();
@@ -60,18 +75,64 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
     super.dispose();
   }
 
+  void _onMapCreated(MapLibreMapController controller) {
+    _mapController = controller;
+  }
+
+  void _onStyleLoaded() {
+    _refreshPinScreenPositions();
+  }
+
+  // Converts both pins' lat/lng into screen-pixel offsets for this frame's
+  // camera position. Called after the style loads and on every
+  // onCameraIdle (i.e. whenever a pan/zoom/recenter finishes).
+  Future<void> _refreshPinScreenPositions() async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final destination = _destination;
+    final meetup = _meetup;
+    final rawPoints = await controller.toScreenLocationBatch([
+      if (destination != null) destination,
+      if (meetup != null) meetup,
+    ]);
+    // toScreenLocationBatch returns Point<num>, not Point<double> — convert
+    // explicitly rather than declaring our fields as Point<num>, so every
+    // other line touching .x/.y (in ScreenMarker) can keep assuming double.
+    final points =
+        rawPoints.map((p) => math.Point<double>(p.x.toDouble(), p.y.toDouble())).toList();
+    if (!mounted) return;
+    setState(() {
+      var i = 0;
+      _destinationScreenPoint = destination != null ? points[i++] : null;
+      _meetupScreenPoint = meetup != null ? points[i++] : null;
+    });
+  }
+
   // Manual fallback: tapping the map fine-tunes whichever pin is active.
   // Since a raw tap has no place name, the field just shows coordinates
   // until the user searches again.
-  void _handleMapTap(TapPosition tapPos, LatLng point) {
+  //
+  // A plain tap doesn't move the camera, so the tapped screen point is
+  // already exactly where the pin should render — no need to wait for an
+  // onCameraIdle round trip to place it.
+  //
+  // Parameter typed Point<num> (not Point<double>, like the fields above)
+  // because this is a tear-off handed directly to onMapClick — its
+  // parameter type has to match (or be a supertype of) whatever maplibre_gl
+  // actually declares for that callback, and num is the safe common ground
+  // regardless of whether that's double or num underneath.
+  void _handleMapTap(math.Point<num> point, LatLng coordinates) {
+    final screenPoint = math.Point<double>(point.x.toDouble(), point.y.toDouble());
     setState(() {
       if (_mode == _PinMode.destination) {
-        _destination = point;
-        _destinationController.text = _formatLatLng(point);
+        _destination = coordinates;
+        _destinationScreenPoint = screenPoint;
+        _destinationController.text = _formatLatLng(coordinates);
         _destinationConfirmedText = _destinationController.text;
       } else {
-        _meetup = point;
-        _meetupController.text = _formatLatLng(point);
+        _meetup = coordinates;
+        _meetupScreenPoint = screenPoint;
+        _meetupController.text = _formatLatLng(coordinates);
         _meetupConfirmedText = _meetupController.text;
       }
     });
@@ -83,7 +144,7 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
       _mode = _PinMode.destination;
       _destinationConfirmedText = _destinationController.text;
     });
-    _mapController.move(suggestion.point, 15);
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(suggestion.point, 15));
   }
 
   void _handleMeetupSelected(_PlaceSuggestion suggestion) {
@@ -92,19 +153,25 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
       _mode = _PinMode.meetup;
       _meetupConfirmedText = _meetupController.text;
     });
-    _mapController.move(suggestion.point, 15);
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(suggestion.point, 15));
   }
 
   // Tapping into either field jumps the map to whatever that field is
   // currently set to, and makes it the active pin for map taps/results.
   void _handleDestinationFieldActivated() {
     setState(() => _mode = _PinMode.destination);
-    if (_destination != null) _mapController.move(_destination!, 15);
+    final destination = _destination;
+    if (destination != null) {
+      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(destination, 15));
+    }
   }
 
   void _handleMeetupFieldActivated() {
     setState(() => _mode = _PinMode.meetup);
-    if (_meetup != null) _mapController.move(_meetup!, 15);
+    final meetup = _meetup;
+    if (meetup != null) {
+      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(meetup, 15));
+    }
   }
 
   String _formatLatLng(LatLng? point) {
@@ -128,8 +195,8 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                 Text('Plan a ride', style: AppText.display(size: 18)),
               ],
             ),
-            // Live OpenStreetMap view. Tap the map to drop a pin for
-            // whichever field is active — toggled by the chips below.
+            // Live map view. Tap the map to drop a pin for whichever field
+            // is active — toggled by the chips below.
             Container(
               height: 280,
               margin: const EdgeInsets.symmetric(horizontal: 20),
@@ -138,34 +205,43 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: AppColors.asphalt3),
               ),
-              child: FlutterMap(
-                mapController: _mapController,
-                options: MapOptions(
-                  initialCenter: _destination ?? const LatLng(14.15, 121.0),
-                  initialZoom: 14,
-                  onTap: _handleMapTap,
-                ),
+              child: Stack(
                 children: [
-                  RutaMapLayers.tileLayer(),
-                  MarkerLayer(
-                    markers: [
-                      if (_destination != null)
-                        Marker(
-                          point: _destination!,
-                          width: 28,
-                          height: 28,
-                          child: const Icon(Icons.location_pin, color: AppColors.route, size: 28),
-                        ),
-                      if (_meetup != null)
-                        Marker(
-                          point: _meetup!,
-                          width: 24,
-                          height: 24,
-                          child: const Icon(Icons.location_pin, color: AppColors.rust, size: 24),
-                        ),
-                    ],
+                  MapLibreMap(
+                    styleString: _mapStyleUrl,
+                    initialCameraPosition: CameraPosition(
+                      target: _destination ?? const LatLng(14.15, 121.0),
+                      zoom: 14,
+                    ),
+                    trackCameraPosition: true,
+                    onMapCreated: _onMapCreated,
+                    onStyleLoadedCallback: _onStyleLoaded,
+                    onMapClick: _handleMapTap,
+                    // onCameraIdle alone only refreshes once a drag/pinch
+                    // gesture finishes, so the pins would sit frozen
+                    // mid-drag and snap into place afterwards —
+                    // onCameraMove fires continuously while the camera is
+                    // moving, keeping them glued to the map during the
+                    // gesture itself.
+                    onCameraMove: (_) => _refreshPinScreenPositions(),
+                    onCameraIdle: _refreshPinScreenPositions,
                   ),
-                  RutaMapLayers.attribution(),
+                  if (_destination != null)
+                    ScreenMarker(
+                      point: _destinationScreenPoint,
+                      width: 28,
+                      height: 28,
+                      anchor: Alignment.bottomCenter,
+                      child: const Icon(Icons.location_pin, color: AppColors.route, size: 28),
+                    ),
+                  if (_meetup != null)
+                    ScreenMarker(
+                      point: _meetupScreenPoint,
+                      width: 24,
+                      height: 24,
+                      anchor: Alignment.bottomCenter,
+                      child: const Icon(Icons.location_pin, color: AppColors.rust, size: 24),
+                    ),
                 ],
               ),
             ),

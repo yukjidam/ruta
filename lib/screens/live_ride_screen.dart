@@ -2,13 +2,12 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../main.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
-import '../widgets/ruta_map_layers.dart';
+import '../widgets/screen_marker.dart';
 
 // ---------------------------------------------------------------------------
 // Visual palette for this screen only. Kept local (not promoted to
@@ -37,6 +36,21 @@ const _musicPink = Color(0xFFFF3D81);
 // Speedometer dial + metallic-looking outer ring.
 const _speedoDial = Color(0xFF1A1A1F);
 const _speedoRing = [Color(0xFFD8D8DE), Color(0xFF6B6B72), Color(0xFF232327)];
+
+// Free, open vector basemap — no API key, no account, no usage cap.
+// "Positron" is the light, low-contrast style (pale streets, soft green
+// parks) that the old code's comments were describing wanting; swap for
+// 'https://tiles.openfreemap.org/styles/liberty' (more colorful/detailed)
+// or self-host per openfreemap.org if this ever needs a custom look.
+const _mapStyleUrl = 'https://tiles.openfreemap.org/styles/positron';
+
+// Camera pitch (0 = straight down, 60 = MapLibre's usual max) for the
+// Waze-style forward tilt. This is a REAL 3D camera angle now, handled
+// natively by MapLibre — it replaces the old Matrix4/rotateX perspective
+// hack entirely, which is what was causing the warped "upside down" look
+// near the top of the screen (far-away content was being pushed past the
+// safe range of that fake-perspective math). Tune 0–60 to taste.
+const _cameraTilt = 50.0;
 
 // Dummy positions along Aguinaldo Hwy — swap for Supabase Realtime
 // broadcast positions once Phase 8 wires up real GPS. The rider's own
@@ -88,17 +102,27 @@ double _bearingDegrees(LatLng from, LatLng to) {
 }
 
 // Initial heading only, so the map opens already facing the right way
-// instead of snapping into rotation after the first frame. Negated because
-// flutter_map's rotation runs opposite to compass bearing — without the
-// flip the map turned away from the road instead of facing it. After the
-// first frame, _LiveRideScreenState's simulation timer takes over and
+// instead of snapping into rotation after the first frame. After the first
+// frame, _LiveRideScreenState's simulation timer takes over and
 // recalculates this on every step.
-final double _headingDeg = -_bearingDegrees(_routePoints[0], _routePoints[1]);
+//
+// NOT negated (flutter_map's version of this was: `-_bearingDegrees(...)`,
+// with a comment about flutter_map's rotation running "opposite to compass
+// bearing"). MapLibre's CameraPosition.bearing is defined as "the compass
+// direction that is up" — exactly the plain heading-up formula, no flip
+// needed. If the map ever looks rotated backwards again, this is the first
+// place to check, but it shouldn't be.
+final double _headingDeg = _bearingDegrees(_routePoints[0], _routePoints[1]);
 
 // How often the simulated rider advances to the next route point. Purely a
 // demo cadence — replace with the real position-stream callback cadence
 // once GPS is wired up.
 const _simStepInterval = Duration(milliseconds: 1400);
+
+/// maplibre_gl's line/circle annotation options take colors as hex strings
+/// rather than Flutter Color objects — this converts one, dropping the
+/// alpha channel (annotations use a separate opacity field if needed).
+String _colorToHex(Color color) => '#${color.value.toRadixString(16).padLeft(8, '0').substring(2)}';
 
 class LiveRideScreen extends StatefulWidget {
   const LiveRideScreen({super.key});
@@ -108,7 +132,10 @@ class LiveRideScreen extends StatefulWidget {
 }
 
 class _LiveRideScreenState extends State<LiveRideScreen> {
-  final MapController _mapController = MapController();
+  // Unlike flutter_map's MapController (constructed directly),
+  // MapLibreMapController is handed to us via onMapCreated once the native
+  // map view is ready — so this starts null.
+  MapLibreMapController? _mapController;
 
   // Live "you are here" state. Starts at the first route point and steps
   // forward along _routePoints on a timer to fake movement. Once Phase 8
@@ -125,6 +152,14 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   // as Waze/Google Maps' compass button.
   bool _headingLocked = true;
 
+  // Screen-pixel positions for the custom Flutter-widget markers (flag,
+  // heading puck, rider pins) — see widgets/screen_marker.dart for why
+  // these exist instead of a flutter_map-style MarkerLayer. Null until the
+  // first lookup completes.
+  math.Point<double>? _flagScreenPoint;
+  math.Point<double>? _puckScreenPoint;
+  List<math.Point<double>?> _riderScreenPoints = const [null, null, null];
+
   @override
   void initState() {
     super.initState();
@@ -139,6 +174,65 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   void dispose() {
     _simTimer?.cancel();
     super.dispose();
+  }
+
+  void _onMapCreated(MapLibreMapController controller) {
+    _mapController = controller;
+  }
+
+  void _onStyleLoaded() {
+    _addRouteLine();
+    // Initial screen-position lookup so the markers appear as soon as the
+    // style is ready, rather than waiting for the first onCameraIdle.
+    _refreshMarkerScreenPositions();
+  }
+
+  // Route-ahead line: two overlapping native Line annotations fake the
+  // casing/outline look flutter_map's PolylineLayer gave us for free — a
+  // wide dark-purple line underneath, a narrower brighter one on top. Swap
+  // _routePoints for the real ORS polyline once Phase 10 lands.
+  Future<void> _addRouteLine() async {
+    final controller = _mapController;
+    if (controller == null) return;
+    await controller.addLine(LineOptions(
+      geometry: _routePoints,
+      lineColor: _colorToHex(_routeShadowColor),
+      lineWidth: 12,
+      lineJoin: 'round',
+    ));
+    await controller.addLine(LineOptions(
+      geometry: _routePoints,
+      lineColor: _colorToHex(_routeLineColor),
+      lineWidth: 7,
+      lineJoin: 'round',
+    ));
+  }
+
+  // Converts each marker's lat/lng into a screen-pixel offset for this
+  // frame's camera position. Called after the style loads and on every
+  // onCameraIdle (i.e. whenever a pan/zoom/recenter/reset finishes), which
+  // covers both user gestures and our own animateCamera() calls below.
+  Future<void> _refreshMarkerScreenPositions() async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final rawPoints = await controller.toScreenLocationBatch([
+      _routePoints.last,
+      _livePosition,
+      _groupPositions[0],
+      _groupPositions[1],
+      _groupPositions[2],
+    ]);
+    // toScreenLocationBatch returns Point<num>, not Point<double> — convert
+    // explicitly rather than declaring our fields as Point<num>, so every
+    // other line touching .x/.y (in ScreenMarker) can keep assuming double.
+    final points =
+        rawPoints.map((p) => math.Point<double>(p.x.toDouble(), p.y.toDouble())).toList();
+    if (!mounted) return;
+    setState(() {
+      _flagScreenPoint = points[0];
+      _puckScreenPoint = points[1];
+      _riderScreenPoints = points.sublist(2);
+    });
   }
 
   // Steps the rider one point further along the dummy route, recomputes the
@@ -160,7 +254,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     }
     final from = _routePoints[_routeIndex];
     final to = _routePoints[_routeIndex + 1];
-    final newHeading = -_bearingDegrees(from, to);
+    final newHeading = _bearingDegrees(from, to); // not negated — see _headingDeg's comment
 
     setState(() {
       _livePosition = from;
@@ -169,8 +263,13 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     });
 
     if (_headingLocked) {
-      final currentZoom = _mapController.camera.zoom;
-      _mapController.moveAndRotate(_livePosition, currentZoom, _liveHeadingDeg);
+      final zoom = _mapController?.cameraPosition?.zoom ?? 15.5;
+      _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+        CameraPosition(
+            target: _livePosition, zoom: zoom, bearing: _liveHeadingDeg, tilt: _cameraTilt),
+      ));
+      // Marker screen positions refresh themselves via onCameraIdle once
+      // that animation settles — no need to call it again here.
     }
   }
 
@@ -178,16 +277,28 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   // the rider had panned away or hit "north up".
   void _recenter() {
     _headingLocked = true;
-    _mapController.moveAndRotate(_livePosition, 15.5, _liveHeadingDeg);
+    _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+      CameraPosition(
+          target: _livePosition, zoom: 15.5, bearing: _liveHeadingDeg, tilt: _cameraTilt),
+    ));
   }
 
   // Nav apps that lock rotation to heading still give you a way back to
   // north-up — this is that escape hatch. Also disengages heading-lock so
   // the simulation loop stops fighting the user's view until they tap
-  // _recenter() again.
+  // _recenter() again. Keeps the current target/zoom/tilt, only zeroing
+  // the bearing.
   void _resetNorth() {
     _headingLocked = false;
-    _mapController.rotate(0);
+    final current = _mapController?.cameraPosition;
+    _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+      CameraPosition(
+        target: current?.target ?? _livePosition,
+        zoom: current?.zoom ?? 15.5,
+        bearing: 0,
+        tilt: current?.tilt ?? _cameraTilt,
+      ),
+    ));
   }
 
   // Placeholder handlers for the two new chrome buttons this redesign
@@ -215,157 +326,91 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       body: Stack(
         children: [
           // ---------------------------------------------------------------
-          // MAP LAYER
+          // MAP LAYER — native MapLibre camera bearing + tilt give the
+          // Waze-style forward tilt directly, no Matrix4/perspective hack
+          // needed. Only the map layer tilts; every overlay below (header,
+          // pills, panels, buttons) stays flat on screen since those are
+          // ordinary Flutter widgets, not part of the tilted camera.
           // ---------------------------------------------------------------
-          // Waze-style forward tilt. Only the map layer tilts — every
-          // overlay below (header, pills, panels, buttons) stays flat on
-          // screen. flutter_map has no native camera pitch (it's a flat 2D
-          // renderer), so this fakes perspective with a Matrix4 transform.
-          // Tradeoffs worth knowing about:
-          //  - pins and the route line tilt along with the tiles, so round
-          //    badges read as slightly oval rather than circular
-          //  - street labels baked into the OSM tile images distort too
-          //    (there's no way to keep just those upright without
-          //    switching to vector tiles)
-          //  - panning near the top of the tilted view moves the map
-          //    further than panning near the bottom, since perspective
-          //    foreshortens that area — a known quirk of this technique,
-          //    not a bug
-          //  - the perspective coefficient (setEntry(3, 2, ...)) and the
-          //    oversized height below both have to stay small enough that
-          //    the farthest points never cross the "camera" plane. Past
-          //    that point, the perspective divide flips sign and anything
-          //    sitting up there — like the destination flag, which is the
-          //    farthest thing on screen in heading-up mode — renders as a
-          //    warped, folded-looking blob instead of just a small distant
-          //    icon. That's what a too-strong value here looks like.
-          ClipRect(
-            child: Transform(
-              alignment: Alignment.center,
-              transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.0011)
-                ..rotateX(0.5), // ~29° forward pitch
-              child: OverflowBox(
-                maxHeight: double.infinity,
-                maxWidth: double.infinity,
-                child: SizedBox(
-                  // Oversized in both directions. The rotateX tilt turns
-                  // the map into a trapezoid — narrower at the top than
-                  // the bottom — so sizing this to exactly screenSize.width
-                  // left black wedges from the Scaffold showing through at
-                  // the top-left/top-right corners. Widening it (and
-                  // centering it via OverflowBox's default alignment)
-                  // pushes those trapezoid edges back out past the screen
-                  // bounds, and ClipRect above trims the rest.
-                  width: screenSize.width * 1.6,
-                  height: screenSize.height * 1.6,
-                  child: FlutterMap(
-                    mapController: _mapController,
-                    options: MapOptions(
-                      initialCenter: LatLng(14.2620, 120.8770),
-                      initialZoom: 15.5,
-                      // Heading-up, like Waze: the map faces your
-                      // direction of travel instead of true north. Manual
-                      // rotate is disabled since rotation is
-                      // heading-locked — _resetNorth() is the way back to
-                      // north-up.
-                      initialRotation: _headingDeg,
-                      interactionOptions: const InteractionOptions(
-                        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-                      ),
-                    ),
-                    children: [
-                      // NOTE: the basemap's own colors (off-white streets,
-                      // pale green parks, gray road lines) come from
-                      // whatever tile provider/style RutaMapLayers.tileLayer()
-                      // points at — that lives in widgets/ruta_map_layers.dart
-                      // and isn't touched by this redesign. If it's still
-                      // pointed at a default OSM raster style, swap it for
-                      // a light vector style (e.g. a "Positron"-style
-                      // MapTiler/Stadia layer) to fully match the
-                      // reference look.
-                      RutaMapLayers.tileLayer(),
-                      // Route-ahead outline: a darker purple casing line
-                      // for contrast against a light basemap, with the
-                      // brighter purple-blue route color drawn on top.
-                      // Swap _routePoints for the real ORS polyline once
-                      // Phase 10 lands.
-                      PolylineLayer(
-                        polylines: [
-                          Polyline(
-                            points: _routePoints,
-                            strokeWidth: 12,
-                            color: _routeShadowColor,
-                            strokeCap: StrokeCap.round,
-                            strokeJoin: StrokeJoin.round,
-                          ),
-                          Polyline(
-                            points: _routePoints,
-                            strokeWidth: 7,
-                            color: _routeLineColor,
-                            strokeCap: StrokeCap.round,
-                            strokeJoin: StrokeJoin.round,
-                          ),
-                        ],
-                      ),
-                      MarkerLayer(
-                        markers: [
-                          Marker(
-                            point: _routePoints.last,
-                            width: 26,
-                            height: 26,
-                            alignment: Alignment.topCenter,
-                            // rotate: false (flutter_map's default too, but
-                            // set explicitly here) means no counter-rotation
-                            // is applied, so this marker turns together with
-                            // the tiles whenever the map rotates, instead of
-                            // staying screen-locked upright.
-                            rotate: false,
-                            child: const Icon(Icons.flag_circle, color: _routeLineColor, size: 26),
-                          ),
-                          Marker(
-                            point: _livePosition,
-                            width: 54,
-                            height: 54,
-                            // Always points straight up. Since the map
-                            // itself rotates to match _liveHeadingDeg on
-                            // every simulated step (see
-                            // _advanceSimulatedPosition above), "up on
-                            // screen" always means "the direction you're
-                            // currently facing" — no separate rotation
-                            // needed here, in the demo or with real GPS.
-                            child: const _HeadingArrow(),
-                          ),
-                          Marker(
-                            point: _groupPositions[0],
-                            width: 34,
-                            height: 34,
-                            // See the flag marker's comment above — rotates
-                            // with the map instead of staying screen-locked.
-                            rotate: false,
-                            child: const _RiderPin(initials: 'JM', color: AppColors.route),
-                          ),
-                          Marker(
-                            point: _groupPositions[1],
-                            width: 34,
-                            height: 34,
-                            rotate: false,
-                            child: const _RiderPin(initials: 'KR', color: AppColors.pine),
-                          ),
-                          Marker(
-                            point: _groupPositions[2],
-                            width: 34,
-                            height: 34,
-                            rotate: false,
-                            child: const _RiderPin(initials: 'MT', color: AppColors.rust),
-                          ),
-                        ],
-                      ),
-                      RutaMapLayers.attribution(),
-                    ],
-                  ),
-                ),
+          Positioned.fill(
+            child: MapLibreMap(
+              styleString: _mapStyleUrl,
+              initialCameraPosition: CameraPosition(
+                target: LatLng(14.2620, 120.8770),
+                zoom: 15.5,
+                bearing: _headingDeg,
+                tilt: _cameraTilt,
               ),
+              trackCameraPosition: true,
+              // Heading-up, like Waze: the map faces your direction of
+              // travel instead of true north. Manual rotate/tilt gestures
+              // are disabled since both are heading-locked and fixed —
+              // _resetNorth() is the way back to north-up. Our own
+              // explore-icon button covers that, so the native compass
+              // widget is turned off to avoid a redundant control.
+              compassEnabled: false,
+              rotateGesturesEnabled: false,
+              tiltGesturesEnabled: false,
+              onMapCreated: _onMapCreated,
+              onStyleLoadedCallback: _onStyleLoaded,
+              // onCameraIdle alone only refreshes once a gesture (drag,
+              // pinch, recenter) finishes, so the markers would sit frozen
+              // mid-drag and then snap into place — onCameraMove fires
+              // continuously while the camera is moving, which is what
+              // keeps them glued to the map the whole time you're dragging.
+              onCameraMove: (_) => _refreshMarkerScreenPositions(),
+              onCameraIdle: _refreshMarkerScreenPositions,
+            ),
+          ),
+          // Destination flag — rotates with the map (Transform.rotate by
+          // the current heading) so it stays glued to the route's actual
+          // end point orientation, matching the flag/rider-pin behavior
+          // from the flutter_map version.
+          ScreenMarker(
+            point: _flagScreenPoint,
+            width: 26,
+            height: 26,
+            anchor: Alignment.bottomCenter,
+            child: Transform.rotate(
+              angle: -_liveHeadingDeg * math.pi / 180,
+              child: const Icon(Icons.flag_circle, color: _routeLineColor, size: 26),
+            ),
+          ),
+          // "You are here, facing this way" puck. Always points straight
+          // up and needs no extra rotation: the map's own bearing already
+          // equals _liveHeadingDeg, so "up on screen" already means "the
+          // direction you're currently facing".
+          ScreenMarker(
+            point: _puckScreenPoint,
+            width: 54,
+            height: 54,
+            child: const _HeadingArrow(),
+          ),
+          ScreenMarker(
+            point: _riderScreenPoints[0],
+            width: 34,
+            height: 34,
+            child: Transform.rotate(
+              angle: -_liveHeadingDeg * math.pi / 180,
+              child: const _RiderPin(initials: 'JM', color: AppColors.route),
+            ),
+          ),
+          ScreenMarker(
+            point: _riderScreenPoints[1],
+            width: 34,
+            height: 34,
+            child: Transform.rotate(
+              angle: -_liveHeadingDeg * math.pi / 180,
+              child: const _RiderPin(initials: 'KR', color: AppColors.pine),
+            ),
+          ),
+          ScreenMarker(
+            point: _riderScreenPoints[2],
+            width: 34,
+            height: 34,
+            child: Transform.rotate(
+              angle: -_liveHeadingDeg * math.pi / 180,
+              child: const _RiderPin(initials: 'MT', color: AppColors.rust),
             ),
           ),
 
