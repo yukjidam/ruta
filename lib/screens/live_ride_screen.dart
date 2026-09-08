@@ -1,47 +1,55 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../main.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
-import '../widgets/screen_marker.dart';
 
 // ---------------------------------------------------------------------------
-// Visual palette for this screen only. Kept local (not promoted to
-// AppColors) since this is a prototype re-skin — move these into the shared
-// theme once the look is signed off.
+// Visual palette for this screen, now pulled from the shared AppColors/
+// AppText tokens instead of one-off hex values, so the live-ride screen
+// reads as part of the same app as everything else instead of its own
+// prototype skin.
 // ---------------------------------------------------------------------------
 
-// Route line: vivid purple-blue with a darker outline so it pops against a
-// light basemap, Waze-style.
-const _routeLineColor = Color(0xFF7C5CFC);
-const _routeShadowColor = Color(0xFF3A2A7A);
+// Route line: the theme's literal "route" gold, cased in an asphalt shade
+// so it reads as a lane cut into the dark chrome — Waze-style outline, but
+// drawn from AppColors instead of an unrelated purple.
+const _routeLineColor = AppColors.route;
+const _routeShadowColor = AppColors.asphalt3;
 
-// "You are here" puck.
-const _navArrowCyan = Color(0xFF00E1D9);
+// "You are here" puck. Uses `success` (green) rather than `route` (gold) so
+// your own position never gets confused with the gold route line or with
+// the gold-colored group-ride pin — see _RiderPin usages below.
+const _liveMarkerColor = AppColors.success;
 
-// Top instruction header.
-const _headerBlack = Color(0xFF15151B);
+// Top instruction header + turn-sign chip.
+const _headerColor = AppColors.asphalt;
+const _turnSignColor = AppColors.rust;
 
-// Current-street pill, same family as the route line so the two read as
-// "one system" at a glance.
-const _streetPillPurple = Color(0xFF6E4CF0);
+// Music FAB — was an off-brand pink, now the theme's pine accent.
+const _musicColor = AppColors.pine;
 
-// Music FAB.
-const _musicPink = Color(0xFFFF3D81);
-
-// Speedometer dial + metallic-looking outer ring.
-const _speedoDial = Color(0xFF1A1A1F);
-const _speedoRing = [Color(0xFFD8D8DE), Color(0xFF6B6B72), Color(0xFF232327)];
+// Speedometer dial + progress arc.
+const _speedoDial = AppColors.asphalt;
+const _speedoTrack = AppColors.asphalt3;
+const _speedoArc = AppColors.route;
 
 // Free, open vector basemap — no API key, no account, no usage cap.
 // "Positron" is the light, low-contrast style (pale streets, soft green
-// parks) that the old code's comments were describing wanting; swap for
-// 'https://tiles.openfreemap.org/styles/liberty' (more colorful/detailed)
-// or self-host per openfreemap.org if this ever needs a custom look.
+// parks). OpenFreeMap doesn't ship an official dark preset, so rather than
+// guess at internal vector-layer IDs and risk a silent runtime failure on
+// `setLayerProperty`, the dark/asphalt look is achieved with a themed scrim
+// + vignette drawn over the map (see `_MapScrim` below) plus theme-colored
+// route/markers. If a true dark basemap is wanted later, the real fix is a
+// self-hosted custom style JSON (openfreemap.org) rather than a style
+// swap here.
 const _mapStyleUrl = 'https://tiles.openfreemap.org/styles/positron';
 
 // Camera pitch (0 = straight down, 60 = MapLibre's usual max) for the
@@ -80,7 +88,6 @@ const _routePoints = [
 // Kept as simple constants for now so the layout is easy to re-point later.
 const _turnDistance = '700 m';
 const _upcomingStreet = 'Jefferson Avenue';
-const _currentStreet = 'John St.';
 const _currentSpeedKmh = 60;
 const _tripSummary = '48 min  •  10:29  •  12 mi';
 const _tripProgress = 0.42;
@@ -148,17 +155,38 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   Timer? _simTimer;
 
   // True while the camera is heading-locked (the normal nav state).
-  // Flipped off by _resetNorth() and back on by _recenter(), same pattern
+  // Flipped off by _toggleNorthUp() and back on by _recenter(), same pattern
   // as Waze/Google Maps' compass button.
   bool _headingLocked = true;
 
-  // Screen-pixel positions for the custom Flutter-widget markers (flag,
-  // heading puck, rider pins) — see widgets/screen_marker.dart for why
-  // these exist instead of a flutter_map-style MarkerLayer. Null until the
-  // first lookup completes.
-  math.Point<double>? _flagScreenPoint;
-  math.Point<double>? _puckScreenPoint;
-  List<math.Point<double>?> _riderScreenPoints = const [null, null, null];
+  // Native MapLibre Symbol handles for the flag, heading puck, and rider
+  // pins. These replace the old screen-pixel-projected Flutter-widget
+  // overlay (ScreenMarker + toScreenLocationBatch): a Symbol is attached
+  // directly to the map's own GPU layer, so it moves in lockstep with the
+  // tiles on every pan/zoom/tilt frame — no async screen-position lookup,
+  // no one-frame lag, no drift. Null until _registerMarkerSymbols() (called
+  // from _onStyleLoaded) finishes adding them.
+  Symbol? _flagSymbol;
+  Symbol? _puckSymbol;
+  List<Symbol?> _riderSymbols = const [null, null, null];
+
+  // GlobalKeys on the (invisible, off-screen) RepaintBoundary-wrapped pin
+  // widgets built in build() below. Each is rendered once, off-screen, so
+  // its pixels can be captured via RenderRepaintBoundary.toImage() and
+  // registered as a MapLibre style image — see _captureImage() and
+  // _registerMarkerSymbols(). This is what lets the *same* _MapPin /
+  // _RiderPin / _HeadingArrow widgets used elsewhere in the app become
+  // native map icons instead of a parallel screen-position system.
+  final _flagImageKey = GlobalKey();
+  final _puckImageKey = GlobalKey();
+  final _rider0ImageKey = GlobalKey();
+  final _rider1ImageKey = GlobalKey();
+  final _rider2ImageKey = GlobalKey();
+
+  // Set once the hidden pin widgets have gone through a real layout/paint
+  // pass, so _registerMarkerSymbols() (which needs their RenderObjects)
+  // never runs before there's anything to capture.
+  bool _hiddenMarkersReady = false;
 
   @override
   void initState() {
@@ -168,6 +196,14 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     // Re-enable this line (or swap it for the real position-stream
     // listener per the comments above) once movement is wanted again.
     // _simTimer = Timer.periodic(_simStepInterval, (_) => _advanceSimulatedPosition());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _hiddenMarkersReady = true;
+      // The map style can finish loading before or after this first frame,
+      // so whichever of these two happens second is the one that actually
+      // registers the symbols — see _onStyleLoaded and _maybeRegisterMarkerSymbols.
+      _maybeRegisterMarkerSymbols();
+    });
   }
 
   @override
@@ -182,9 +218,95 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
 
   void _onStyleLoaded() {
     _addRouteLine();
-    // Initial screen-position lookup so the markers appear as soon as the
-    // style is ready, rather than waiting for the first onCameraIdle.
-    _refreshMarkerScreenPositions();
+    // Native map-layer markers for the destination and the rider's current
+    // position — unaffected by any of this, since they were already
+    // lat/lng-anchored Circle annotations.
+    _addLocationMarkers();
+    // Flag/puck/rider-pin symbols also need the hidden pin widgets to have
+    // been laid out and painted at least once (see initState's post-frame
+    // callback) before they can be snapshotted into style images, so this
+    // only actually registers them once both things are ready.
+    _maybeRegisterMarkerSymbols();
+  }
+
+  // Runs _registerMarkerSymbols() exactly once, as soon as both of its
+  // prerequisites are satisfied: the hidden pin widgets have been through a
+  // real frame (_hiddenMarkersReady) and the map controller/style exists.
+  // Style-load and first-frame timing aren't guaranteed to happen in any
+  // particular order, so both call sites funnel through this guard instead
+  // of assuming one always comes first.
+  bool _markerSymbolsRegistered = false;
+  void _maybeRegisterMarkerSymbols() {
+    if (_markerSymbolsRegistered || !_hiddenMarkersReady || _mapController == null) return;
+    _markerSymbolsRegistered = true;
+    _registerMarkerSymbols();
+  }
+
+  // Snapshots one hidden, off-screen pin widget (identified by its
+  // RepaintBoundary GlobalKey) into PNG bytes, at the device's actual
+  // pixel ratio so the resulting map icon isn't blurry on high-DPI
+  // screens.
+  Future<Uint8List> _captureMarkerImage(GlobalKey key) async {
+    final boundary = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
+    final image = await boundary.toImage(pixelRatio: pixelRatio);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    return byteData!.buffer.asUint8List();
+  }
+
+  // Registers each pin widget as a MapLibre style image, then adds one
+  // native Symbol per marker at its real geo position. From here on,
+  // moving a marker is just controller.updateSymbol(..., geometry: ...) —
+  // no screen-pixel math, so no lag and no drift on zoom/pan/tilt.
+  Future<void> _registerMarkerSymbols() async {
+    final controller = _mapController;
+    if (controller == null) return;
+
+    await controller.addImage('pin_flag', await _captureMarkerImage(_flagImageKey));
+    await controller.addImage('pin_puck', await _captureMarkerImage(_puckImageKey));
+    await controller.addImage('pin_rider_jm', await _captureMarkerImage(_rider0ImageKey));
+    await controller.addImage('pin_rider_kr', await _captureMarkerImage(_rider1ImageKey));
+    await controller.addImage('pin_rider_mt', await _captureMarkerImage(_rider2ImageKey));
+
+    if (!mounted) return;
+
+    final flagSymbol = await controller.addSymbol(SymbolOptions(
+      geometry: _routePoints.last,
+      iconImage: 'pin_flag',
+      iconAnchor: 'bottom',
+    ));
+    final puckSymbol = await controller.addSymbol(SymbolOptions(
+      geometry: _livePosition,
+      iconImage: 'pin_puck',
+      // 'center', not 'bottom': the puck is now a symmetric arrow+glow
+      // icon with no pointed tail, so the geo point should land in the
+      // middle of the icon rather than at its base.
+      iconAnchor: 'center',
+    ));
+    final riderSymbols = [
+      await controller.addSymbol(SymbolOptions(
+        geometry: _groupPositions[0],
+        iconImage: 'pin_rider_jm',
+        iconAnchor: 'bottom',
+      )),
+      await controller.addSymbol(SymbolOptions(
+        geometry: _groupPositions[1],
+        iconImage: 'pin_rider_kr',
+        iconAnchor: 'bottom',
+      )),
+      await controller.addSymbol(SymbolOptions(
+        geometry: _groupPositions[2],
+        iconImage: 'pin_rider_mt',
+        iconAnchor: 'bottom',
+      )),
+    ];
+
+    if (!mounted) return;
+    setState(() {
+      _flagSymbol = flagSymbol;
+      _puckSymbol = puckSymbol;
+      _riderSymbols = riderSymbols;
+    });
   }
 
   // Route-ahead line: two overlapping native Line annotations fake the
@@ -208,31 +330,37 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     ));
   }
 
-  // Converts each marker's lat/lng into a screen-pixel offset for this
-  // frame's camera position. Called after the style loads and on every
-  // onCameraIdle (i.e. whenever a pan/zoom/recenter/reset finishes), which
-  // covers both user gestures and our own animateCamera() calls below.
-  Future<void> _refreshMarkerScreenPositions() async {
+  // Guaranteed-visible marker for the destination, drawn as a native
+  // MapLibre Circle annotation tied directly to lat/lng. This renders
+  // immediately on style load, before the pin/arrow Symbol icons finish
+  // their one-time image capture and registration (see
+  // _registerMarkerSymbols) — so the route's end point is always marked
+  // even during that brief setup window.
+  //
+  // There's no equivalent circle for the rider's own position anymore —
+  // that's now carried entirely by the heading arrow itself (see
+  // _HeadingArrow), rather than a separate green halo+dot underneath it.
+  Future<void> _addLocationMarkers() async {
     final controller = _mapController;
     if (controller == null) return;
-    final rawPoints = await controller.toScreenLocationBatch([
-      _routePoints.last,
-      _livePosition,
-      _groupPositions[0],
-      _groupPositions[1],
-      _groupPositions[2],
-    ]);
-    // toScreenLocationBatch returns Point<num>, not Point<double> — convert
-    // explicitly rather than declaring our fields as Point<num>, so every
-    // other line touching .x/.y (in ScreenMarker) can keep assuming double.
-    final points =
-        rawPoints.map((p) => math.Point<double>(p.x.toDouble(), p.y.toDouble())).toList();
-    if (!mounted) return;
-    setState(() {
-      _flagScreenPoint = points[0];
-      _puckScreenPoint = points[1];
-      _riderScreenPoints = points.sublist(2);
-    });
+
+    Future<void> addMarker(LatLng at, Color color) async {
+      await controller.addCircle(CircleOptions(
+        geometry: at,
+        circleRadius: 16,
+        circleColor: _colorToHex(color),
+        circleOpacity: 0.25,
+      ));
+      await controller.addCircle(CircleOptions(
+        geometry: at,
+        circleRadius: 7,
+        circleColor: _colorToHex(color),
+        circleStrokeColor: _colorToHex(Colors.white),
+        circleStrokeWidth: 2,
+      ));
+    }
+
+    await addMarker(_routePoints.last, _turnSignColor); // destination
   }
 
   // Steps the rider one point further along the dummy route, recomputes the
@@ -262,14 +390,21 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       _routeIndex++;
     });
 
+    // Move the native puck symbol to the new lat/lng directly — no
+    // screen-pixel projection involved, so this stays glued to the map
+    // through the camera animation below rather than lagging a frame
+    // behind it.
+    final puckSymbol = _puckSymbol;
+    if (puckSymbol != null) {
+      _mapController?.updateSymbol(puckSymbol, SymbolOptions(geometry: _livePosition));
+    }
+
     if (_headingLocked) {
       final zoom = _mapController?.cameraPosition?.zoom ?? 15.5;
       _mapController?.animateCamera(CameraUpdate.newCameraPosition(
         CameraPosition(
             target: _livePosition, zoom: zoom, bearing: _liveHeadingDeg, tilt: _cameraTilt),
       ));
-      // Marker screen positions refresh themselves via onCameraIdle once
-      // that animation settles — no need to call it again here.
     }
   }
 
@@ -284,18 +419,20 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 
   // Nav apps that lock rotation to heading still give you a way back to
-  // north-up — this is that escape hatch. Also disengages heading-lock so
-  // the simulation loop stops fighting the user's view until they tap
-  // _recenter() again. Keeps the current target/zoom/tilt, only zeroing
-  // the bearing.
-  void _resetNorth() {
-    _headingLocked = false;
+  // north-up — this toggles between the two instead of always forcing
+  // north-up. Previously every tap set bearing to 0 unconditionally, so a
+  // second tap looked like it did nothing; now it flips _headingLocked and
+  // swaps the bearing to match, leaving target/zoom/tilt untouched either
+  // way (_recenter(), the big cyan button, is still what re-centers
+  // position).
+  void _toggleNorthUp() {
     final current = _mapController?.cameraPosition;
+    setState(() => _headingLocked = !_headingLocked);
     _mapController?.animateCamera(CameraUpdate.newCameraPosition(
       CameraPosition(
         target: current?.target ?? _livePosition,
         zoom: current?.zoom ?? 15.5,
-        bearing: 0,
+        bearing: _headingLocked ? _liveHeadingDeg : 0,
         tilt: current?.tilt ?? _cameraTilt,
       ),
     ));
@@ -345,72 +482,99 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
               // Heading-up, like Waze: the map faces your direction of
               // travel instead of true north. Manual rotate/tilt gestures
               // are disabled since both are heading-locked and fixed —
-              // _resetNorth() is the way back to north-up. Our own
+              // _toggleNorthUp() is the way back to north-up. Our own
               // explore-icon button covers that, so the native compass
               // widget is turned off to avoid a redundant control.
               compassEnabled: false,
               rotateGesturesEnabled: false,
               tiltGesturesEnabled: false,
+              // Explicit (rather than relying on the plugin's default) so
+              // it's clear pinch-to-zoom is intentionally left on.
+              zoomGesturesEnabled: true,
+              scrollGesturesEnabled: true,
               onMapCreated: _onMapCreated,
               onStyleLoadedCallback: _onStyleLoaded,
-              // onCameraIdle alone only refreshes once a gesture (drag,
-              // pinch, recenter) finishes, so the markers would sit frozen
-              // mid-drag and then snap into place — onCameraMove fires
-              // continuously while the camera is moving, which is what
-              // keeps them glued to the map the whole time you're dragging.
-              onCameraMove: (_) => _refreshMarkerScreenPositions(),
-              onCameraIdle: _refreshMarkerScreenPositions,
+              // No onCameraMove/onCameraIdle marker refresh needed anymore:
+              // the flag/puck/rider pins are native Symbol annotations
+              // (see _registerMarkerSymbols), so MapLibre repositions them
+              // on its own GPU layer every frame the camera moves — the
+              // same way the destination/position Circle annotations
+              // below always tracked correctly.
             ),
           ),
-          // Destination flag — rotates with the map (Transform.rotate by
-          // the current heading) so it stays glued to the route's actual
-          // end point orientation, matching the flag/rider-pin behavior
-          // from the flutter_map version.
-          ScreenMarker(
-            point: _flagScreenPoint,
-            width: 26,
-            height: 26,
-            anchor: Alignment.bottomCenter,
-            child: Transform.rotate(
-              angle: -_liveHeadingDeg * math.pi / 180,
-              child: const Icon(Icons.flag_circle, color: _routeLineColor, size: 26),
-            ),
-          ),
-          // "You are here, facing this way" puck. Always points straight
-          // up and needs no extra rotation: the map's own bearing already
-          // equals _liveHeadingDeg, so "up on screen" already means "the
-          // direction you're currently facing".
-          ScreenMarker(
-            point: _puckScreenPoint,
-            width: 54,
-            height: 54,
-            child: const _HeadingArrow(),
-          ),
-          ScreenMarker(
-            point: _riderScreenPoints[0],
-            width: 34,
-            height: 34,
-            child: Transform.rotate(
-              angle: -_liveHeadingDeg * math.pi / 180,
-              child: const _RiderPin(initials: 'JM', color: AppColors.route),
-            ),
-          ),
-          ScreenMarker(
-            point: _riderScreenPoints[1],
-            width: 34,
-            height: 34,
-            child: Transform.rotate(
-              angle: -_liveHeadingDeg * math.pi / 180,
-              child: const _RiderPin(initials: 'KR', color: AppColors.pine),
-            ),
-          ),
-          ScreenMarker(
-            point: _riderScreenPoints[2],
-            width: 34,
-            height: 34,
-            child: Transform.rotate(
-              angle: -_liveHeadingDeg * math.pi / 180,
-              child: const _RiderPin(initials: 'MT', color: AppColors.rust),
+          // Themed scrim over the raw basemap tiles — a top-and-bottom
+          // asphalt gradient plus a soft edge vignette. This is what ties
+          // the map's *visual display* to the rest of the app's dark
+          // theme without touching MapLibre's tile rendering itself, and
+          // it does double duty: it's exactly the darkening the header
+          // and bottom stack need to stay legible over bright tiles.
+          // IgnorePointer so gestures still reach the map underneath.
+          const Positioned.fill(child: IgnorePointer(child: _MapScrim())),
+          // The flag, heading puck, and rider pins themselves are now
+          // native MapLibre Symbol annotations, added by
+          // _registerMarkerSymbols() straight onto the map's own GPU
+          // layer — that's what fixes both the floating lag and the
+          // zoom-time drift, since they're no longer reprojected into
+          // screen pixels on every frame.
+          //
+          // The five widgets below are NOT visible markers: each one is
+          // rendered once, off-screen (Positioned far outside the
+          // viewport), purely so _captureMarkerImage() can snapshot its
+          // pixels via RenderRepaintBoundary.toImage() and register that
+          // PNG as a style image for the Symbol to use as its icon. This
+          // is what lets the existing _MapPin/_RiderPin/_HeadingArrow
+          // widgets double as native map icons without hand-drawing a
+          // second, separate icon asset. IgnorePointer keeps them from
+          // ever intercepting touches even though they're technically
+          // still in the tree.
+          IgnorePointer(
+            child: Stack(
+              children: [
+                Positioned(
+                  left: -1000,
+                  top: -1000,
+                  child: RepaintBoundary(
+                    key: _flagImageKey,
+                    child: const _MapPin(
+                      color: _turnSignColor,
+                      headDiameter: 30,
+                      child: Icon(Icons.flag_rounded, color: Colors.white, size: 15),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: -1000,
+                  top: -1000,
+                  child: RepaintBoundary(
+                    key: _puckImageKey,
+                    child: const _HeadingArrow(),
+                  ),
+                ),
+                Positioned(
+                  left: -1000,
+                  top: -1000,
+                  child: RepaintBoundary(
+                    key: _rider0ImageKey,
+                    child: const _RiderPin(initials: 'JM', color: AppColors.route),
+                  ),
+                ),
+                Positioned(
+                  left: -1000,
+                  top: -1000,
+                  child: RepaintBoundary(
+                    key: _rider1ImageKey,
+                    child: const _RiderPin(initials: 'KR', color: AppColors.pine),
+                  ),
+                ),
+                Positioned(
+                  left: -1000,
+                  top: -1000,
+                  child: RepaintBoundary(
+                    key: _rider2ImageKey,
+                    child: const _RiderPin(initials: 'MT', color: AppColors.rust),
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -447,7 +611,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                 const SizedBox(height: 12),
                 _CircleButton(
                   icon: Icons.music_note_rounded,
-                  background: _musicPink,
+                  background: _musicColor,
                   iconColor: Colors.white,
                   onTap: _onMusicTap,
                 ),
@@ -460,18 +624,21 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
             child: Column(
               children: [
                 _CircleButton(
-                  icon: Icons.explore_outlined,
-                  background: AppColors.asphalt2,
-                  iconColor: AppColors.ink,
+                  // Filled when north-up override is active, so the
+                  // button's own state now gives visible feedback that
+                  // the second tap actually did something.
+                  icon: _headingLocked ? Icons.explore_outlined : Icons.explore,
+                  background: _headingLocked ? AppColors.asphalt2 : AppColors.route,
+                  iconColor: _headingLocked ? AppColors.ink : AppColors.darkInk,
                   size: 42,
                   iconSize: 19,
-                  onTap: _resetNorth,
+                  onTap: _toggleNorthUp,
                 ),
                 const SizedBox(height: 12),
                 _CircleButton(
                   icon: Icons.navigation_rounded,
-                  background: _navArrowCyan,
-                  iconColor: Colors.black,
+                  background: _liveMarkerColor,
+                  iconColor: AppColors.darkInk,
                   size: 60,
                   iconSize: 26,
                   onTap: _recenter,
@@ -481,8 +648,9 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           ),
 
           // ---------------------------------------------------------------
-          // BOTTOM STACK — current-street pill, trip summary panel, then
-          // the existing ride-control actions underneath.
+          // BOTTOM STACK — trip summary panel, then the existing
+          // ride-control actions underneath. The current-street pill
+          // ("John St.") that used to sit here has been removed.
           // ---------------------------------------------------------------
           SafeArea(
             top: false,
@@ -492,8 +660,6 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Spacer(),
-                  const _StreetPill(label: _currentStreet),
-                  const SizedBox(height: 10),
                   const _SpeedAndTripRow(),
                   const SizedBox(height: 12),
                   const _RideActionBar(),
@@ -503,6 +669,56 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------
+// Map scrim — themed overlay so the light OpenFreeMap tiles read as part
+// of the app's dark "asphalt" system instead of a bright rectangle
+// dropped behind the chrome.
+// -----------------------------------------------------------------------
+
+class _MapScrim extends StatelessWidget {
+  const _MapScrim();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Top-and-bottom gradient: darkest right behind the header and
+        // bottom stack, fully transparent through the middle so the
+        // route line and markers stay clearly readable.
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                AppColors.asphalt.withOpacity(0.55),
+                Colors.transparent,
+                Colors.transparent,
+                AppColors.asphalt.withOpacity(0.65),
+              ],
+              stops: const [0.0, 0.25, 0.6, 1.0],
+            ),
+          ),
+        ),
+        // Soft radial vignette at the edges — the classic nav-app trick
+        // that pulls the eye toward the route ahead instead of the raw
+        // tile edges.
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment.center,
+              radius: 1.1,
+              colors: [Colors.transparent, AppColors.asphalt.withOpacity(0.35)],
+              stops: const [0.6, 1.0],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -521,7 +737,7 @@ class _TopInstructionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: _headerBlack,
+        color: _headerColor,
         borderRadius: const BorderRadius.only(
           bottomLeft: Radius.circular(24),
           bottomRight: Radius.circular(24),
@@ -537,22 +753,41 @@ class _TopInstructionHeader extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(20, 14, 20, 22),
           child: Row(
             children: [
-              // Dummy turn icon — swap for the routing engine's actual
-              // maneuver type (left/right/roundabout/merge/...) once
-              // Phase 10 lands.
-              const Icon(Icons.turn_right_rounded, color: Colors.white, size: 48),
+              // Turn icon now sits on its own rust road-sign tile instead
+              // of floating bare on the header — reads like an actual
+              // highway sign chip rather than a plain icon+text row. Swap
+              // the icon for the routing engine's real maneuver type
+              // (left/right/roundabout/merge/...) once Phase 10 lands.
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: _turnSignColor,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                        color: _turnSignColor.withOpacity(0.45),
+                        blurRadius: 14,
+                        offset: const Offset(0, 4)),
+                  ],
+                ),
+                child: const Icon(Icons.turn_right_rounded, color: Colors.white, size: 34),
+              ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // Anton (AppText.display) gives the distance the same
+                    // bold "road sign" energy the type system was designed
+                    // for, in place of the previous bespoke bold body text.
                     FittedBox(
                       fit: BoxFit.scaleDown,
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        distance,
-                        style: AppText.body(size: 36, weight: FontWeight.w800, color: Colors.white),
+                        distance.toUpperCase(),
+                        style: AppText.display(size: 38, color: Colors.white),
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -560,44 +795,14 @@ class _TopInstructionHeader extends StatelessWidget {
                       streetName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppText.body(size: 17, weight: FontWeight.w700, color: _navArrowCyan),
+                      style:
+                          AppText.body(size: 17, weight: FontWeight.w700, color: AppColors.route),
                     ),
                   ],
                 ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// -----------------------------------------------------------------------
-// Current-street pill
-// -----------------------------------------------------------------------
-
-class _StreetPill extends StatelessWidget {
-  final String label;
-  const _StreetPill({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.center,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
-        decoration: BoxDecoration(
-          color: _streetPillPurple,
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: [
-            BoxShadow(
-                color: Colors.black.withOpacity(0.35), blurRadius: 12, offset: const Offset(0, 5)),
-          ],
-        ),
-        child: Text(
-          label,
-          style: AppText.body(size: 13, weight: FontWeight.w700, color: Colors.white),
         ),
       ),
     );
@@ -624,48 +829,93 @@ class _SpeedAndTripRow extends StatelessWidget {
   }
 }
 
+// Top-of-scale reference for the gauge's progress arc. Purely a display
+// scale (not a hard cap) — swap for a per-vehicle value once that's
+// available.
+const _speedoMaxKmh = 140;
+
+/// Redesigned speedometer: a real gauge instead of a flat metallic-ring
+/// badge. A 270° arc drawn with CustomPaint sweeps from the bottom-left
+/// round to the bottom-right, dial face and track in the app's asphalt
+/// tones, progress arc in route gold, digits in Anton (AppText.display)
+/// for the same road-sign weight as the turn-distance header.
 class _Speedometer extends StatelessWidget {
   final int speedKmh;
   const _Speedometer({required this.speedKmh});
 
   @override
   Widget build(BuildContext context) {
+    final progress = (speedKmh / _speedoMaxKmh).clamp(0.0, 1.0);
     return Container(
-      width: 84,
-      height: 84,
-      padding: const EdgeInsets.all(3.5),
+      width: 88,
+      height: 88,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: _speedoRing,
-        ),
+        color: _speedoDial,
         boxShadow: [
           BoxShadow(
               color: Colors.black.withOpacity(0.45), blurRadius: 16, offset: const Offset(0, 8)),
         ],
       ),
-      child: Container(
-        decoration: const BoxDecoration(shape: BoxShape.circle, color: _speedoDial),
-        alignment: Alignment.center,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(
-                '$speedKmh',
-                style: AppText.mono(size: 27, weight: FontWeight.w800, color: Colors.white),
+      child: CustomPaint(
+        painter: _SpeedGaugePainter(progress: progress),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  '$speedKmh',
+                  style: AppText.display(size: 30, color: Colors.white),
+                ),
               ),
-            ),
-            Text('km/h',
-                style: AppText.mono(size: 9, weight: FontWeight.w600, color: Colors.white70)),
-          ],
+              Text('km/h',
+                  style: AppText.mono(size: 9, weight: FontWeight.w600, color: AppColors.inkDim)),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+/// Draws the gauge's background track and the gold progress arc behind the
+/// speed readout. Sweeps 270° (7:30 round to 4:30, clock-face-wise) so
+/// there's always a visible gap at the bottom marking "empty".
+class _SpeedGaugePainter extends CustomPainter {
+  final double progress; // 0.0–1.0
+
+  _SpeedGaugePainter({required this.progress});
+
+  static const _startAngle = 0.75 * math.pi; // 135°
+  static const _sweepAngle = 1.5 * math.pi; // 270°
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = (size.shortestSide / 2) - 6;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    final trackPaint = Paint()
+      ..color = _speedoTrack
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 6
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(rect, _startAngle, _sweepAngle, false, trackPaint);
+
+    if (progress > 0) {
+      final progressPaint = Paint()
+        ..color = _speedoArc
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 6
+        ..strokeCap = StrokeCap.round;
+      canvas.drawArc(rect, _startAngle, _sweepAngle * progress, false, progressPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SpeedGaugePainter oldDelegate) => oldDelegate.progress != progress;
 }
 
 class _TripPanel extends StatelessWidget {
@@ -834,7 +1084,106 @@ class _CircleButton extends StatelessWidget {
 }
 
 // -----------------------------------------------------------------------
-// Group-ride avatar pins
+// Shared vertical map pin — round head, pointed tail. Used by the rider's
+// own marker, the group-ride pins, and the destination marker so every
+// location on the map reads as one consistent pin family instead of a mix
+// of circles/badges/icons. Rendered once into a style image and shown as a
+// native Symbol with iconAnchor: 'bottom' (see _registerMarkerSymbols),
+// since the tail's tip — not the widget's geometric center — is what
+// needs to line up with the real geo point.
+//
+// These pins are never rotated to counter the map's heading — a vertical
+// pin should stay upright on screen no matter which way the map is
+// currently facing, the same way Google Maps/Waze keep POI pins upright
+// and reserve rotation for the "you are here" direction arrow alone.
+// -----------------------------------------------------------------------
+
+class _MapPin extends StatelessWidget {
+  final Color color;
+  final double headDiameter;
+  final Widget? child;
+
+  const _MapPin({required this.color, this.headDiameter = 34, this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final tailHeight = headDiameter * 0.42;
+    return SizedBox(
+      width: headDiameter,
+      height: headDiameter + tailHeight,
+      child: CustomPaint(
+        painter: _MapPinPainter(color: color, headDiameter: headDiameter),
+        child: child == null
+            ? null
+            : Padding(
+                padding: EdgeInsets.only(bottom: tailHeight),
+                child: Center(child: child),
+              ),
+      ),
+    );
+  }
+}
+
+class _MapPinPainter extends CustomPainter {
+  final Color color;
+  final double headDiameter;
+
+  _MapPinPainter({required this.color, required this.headDiameter});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = headDiameter / 2;
+    final headCenter = Offset(size.width / 2, r);
+    final tip = Offset(size.width / 2, size.height);
+
+    // Tail: a triangle from two points on the head's circle down to the
+    // tip, half-angle chosen so the triangle's base sits flush with the
+    // circle rather than overlapping or leaving a gap.
+    const halfAngleDeg = 35.0;
+    final rad = halfAngleDeg * math.pi / 180;
+    final left = headCenter + Offset(-r * math.sin(rad), r * math.cos(rad));
+    final right = headCenter + Offset(r * math.sin(rad), r * math.cos(rad));
+
+    final pin = Path.combine(
+      PathOperation.union,
+      Path()..addOval(Rect.fromCircle(center: headCenter, radius: r)),
+      Path()
+        ..moveTo(left.dx, left.dy)
+        ..lineTo(tip.dx, tip.dy)
+        ..lineTo(right.dx, right.dy)
+        ..close(),
+    );
+
+    // Soft drop shadow, offset down slightly, so the pin reads as sitting
+    // above the map rather than flat against it.
+    canvas.save();
+    canvas.translate(0, 2);
+    canvas.drawPath(
+      pin,
+      Paint()
+        ..color = Colors.black.withOpacity(0.35)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+    );
+    canvas.restore();
+
+    canvas.drawPath(pin, Paint()..color = color);
+    canvas.drawPath(
+      pin,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..strokeJoin = StrokeJoin.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _MapPinPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.headDiameter != headDiameter;
+}
+
+// -----------------------------------------------------------------------
+// Group-ride pins
 // -----------------------------------------------------------------------
 
 class _RiderPin extends StatelessWidget {
@@ -845,55 +1194,44 @@ class _RiderPin extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 30,
-      height: 30,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white, width: 3),
-        boxShadow: [
-          BoxShadow(
-              color: Colors.black.withOpacity(0.3), blurRadius: 6, offset: const Offset(0, 2)),
-        ],
-      ),
-      alignment: Alignment.center,
+    return _MapPin(
+      color: color,
+      headDiameter: 32,
       child: Text(initials,
-          style: AppText.mono(size: 10, weight: FontWeight.w700, color: AppColors.darkInk)),
+          style: AppText.mono(size: 10, weight: FontWeight.w700, color: Colors.white)),
     );
   }
 }
 
-/// The "you are here, facing this way" puck — a soft cyan glow behind a
-/// white halo (for contrast against the map in any lighting) with a bold
-/// cyan directional arrow. Always points straight up: the map itself
-/// rotates to heading, so "up" already means "the way you're facing".
+/// The rider's own live-position marker — "you are here, facing this
+/// way". No pin body anymore: just the direction arrow itself, colored to
+/// match the app's "live GPS" green, sitting on a soft glow for the
+/// pulsing-signal feel (Waze/Google Maps' live dot). The icon carries a
+/// small drop shadow instead of the pin's old white stroke, so it stays
+/// readable against both the light basemap tiles and the darker route
+/// line/scrim.
 class _HeadingArrow extends StatelessWidget {
   const _HeadingArrow();
+
+  static const _iconSize = 40.0;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       alignment: Alignment.center,
+      clipBehavior: Clip.none,
       children: [
-        // Soft glow ring — purely decorative, gives the puck a "live GPS
-        // signal" feel like Waze/Google Maps' pulsing blue dot.
         Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: _navArrowCyan.withOpacity(0.22)),
+          width: _iconSize + 14,
+          height: _iconSize + 14,
+          decoration:
+              BoxDecoration(shape: BoxShape.circle, color: _liveMarkerColor.withOpacity(0.22)),
         ),
-        Container(
-          padding: const EdgeInsets.all(7),
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white,
-            border: Border.all(color: _navArrowCyan, width: 3),
-            boxShadow: [
-              BoxShadow(color: Colors.black.withOpacity(0.35), blurRadius: 10, spreadRadius: 1),
-            ],
-          ),
-          child: const Icon(Icons.navigation_rounded, color: _navArrowCyan, size: 24),
+        Icon(
+          Icons.navigation_rounded,
+          color: _liveMarkerColor,
+          size: _iconSize,
+          shadows: const [Shadow(color: Colors.black45, blurRadius: 6, offset: Offset(0, 2))],
         ),
       ],
     );
