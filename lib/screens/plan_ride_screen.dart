@@ -68,6 +68,17 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
   math.Point<double>? _destinationScreenPoint;
   math.Point<double>? _meetupScreenPoint;
 
+  // onCameraMove fires many times per second while the map is panning or
+  // animating (e.g. during the animateCamera triggered by tapping a field,
+  // or a manual drag). _refreshPinScreenPositions is async, so those calls
+  // can overlap and resolve out of order — without this guard, a slower
+  // *older* request can finish after a newer one and overwrite the pins'
+  // screen points with stale coordinates from an earlier camera position,
+  // making a pin visibly jump to the wrong spot. Bumped at the start of
+  // every call; only the request holding the latest id is allowed to apply
+  // its result.
+  int _pinRefreshRequestId = 0;
+
   @override
   void dispose() {
     _destinationController.dispose();
@@ -85,22 +96,37 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
 
   // Converts both pins' lat/lng into screen-pixel offsets for this frame's
   // camera position. Called after the style loads and on every
-  // onCameraIdle (i.e. whenever a pan/zoom/recenter finishes).
+  // onCameraMove/onCameraIdle (i.e. continuously while panning/zooming, and
+  // once more when it settles).
   Future<void> _refreshPinScreenPositions() async {
     final controller = _mapController;
     if (controller == null) return;
+    // Claim this request's place in line. If a later call starts (and
+    // possibly finishes) before this one's await returns, requestId will no
+    // longer match _pinRefreshRequestId by the time we get back, and we'll
+    // know to drop our (now-stale) result instead of applying it.
+    final requestId = ++_pinRefreshRequestId;
     final destination = _destination;
     final meetup = _meetup;
     final rawPoints = await controller.toScreenLocationBatch([
       if (destination != null) destination,
       if (meetup != null) meetup,
     ]);
-    // toScreenLocationBatch returns Point<num>, not Point<double> — convert
-    // explicitly rather than declaring our fields as Point<num>, so every
-    // other line touching .x/.y (in ScreenMarker) can keep assuming double.
-    final points =
-        rawPoints.map((p) => math.Point<double>(p.x.toDouble(), p.y.toDouble())).toList();
-    if (!mounted) return;
+    if (!mounted || requestId != _pinRefreshRequestId) return;
+    // toScreenLocationBatch returns coordinates in PHYSICAL pixels (it talks
+    // to the native MapLibre SDK, which has no concept of Flutter's logical
+    // pixels), but ScreenMarker positions its child with a plain Positioned,
+    // which — like the rest of Flutter's layout system — expects logical
+    // pixels. Left unconverted, every marker renders too far from the map's
+    // origin by a factor of devicePixelRatio, which on most phones is enough
+    // to push it clean outside the map's bounds. Divide back down to logical
+    // pixels here (once, for both pins) rather than inside ScreenMarker,
+    // since this is the one place that actually knows where these numbers
+    // came from.
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final points = rawPoints
+        .map((p) => math.Point<double>(p.x.toDouble() / dpr, p.y.toDouble() / dpr))
+        .toList();
     setState(() {
       var i = 0;
       _destinationScreenPoint = destination != null ? points[i++] : null;
@@ -114,7 +140,9 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
   //
   // A plain tap doesn't move the camera, so the tapped screen point is
   // already exactly where the pin should render — no need to wait for an
-  // onCameraIdle round trip to place it.
+  // onCameraIdle round trip to place it. This point comes from Flutter's
+  // own gesture handling, already in logical pixels — unlike
+  // toScreenLocationBatch above, it needs no devicePixelRatio conversion.
   //
   // Parameter typed Point<num> (not Point<double>, like the fields above)
   // because this is a tear-off handed directly to onMapClick — its
@@ -205,44 +233,55 @@ class _PlanRideScreenState extends State<PlanRideScreen> {
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: AppColors.asphalt3),
               ),
-              child: Stack(
-                children: [
-                  MapLibreMap(
-                    styleString: _mapStyleUrl,
-                    initialCameraPosition: CameraPosition(
-                      target: _destination ?? const LatLng(14.15, 121.0),
-                      zoom: 14,
+              // Pins are drawn as ordinary Flutter widgets positioned over
+              // the native map view (see widgets/screen_marker.dart) since
+              // maplibre_gl has no Flutter-canvas marker layer. The ClipRect
+              // is a hard guarantee — independent of the Container's own
+              // clipBehavior above, which is tied to its decoration and can
+              // behave inconsistently once a native PlatformView shares the
+              // layer — that a marker can never paint outside this box, e.g.
+              // over the search field below, no matter what coordinate
+              // _refreshPinScreenPositions computes for it.
+              child: ClipRect(
+                child: Stack(
+                  children: [
+                    MapLibreMap(
+                      styleString: _mapStyleUrl,
+                      initialCameraPosition: CameraPosition(
+                        target: _destination ?? const LatLng(14.15, 121.0),
+                        zoom: 14,
+                      ),
+                      trackCameraPosition: true,
+                      onMapCreated: _onMapCreated,
+                      onStyleLoadedCallback: _onStyleLoaded,
+                      onMapClick: _handleMapTap,
+                      // onCameraIdle alone only refreshes once a drag/pinch
+                      // gesture finishes, so the pins would sit frozen
+                      // mid-drag and snap into place afterwards —
+                      // onCameraMove fires continuously while the camera is
+                      // moving, keeping them glued to the map during the
+                      // gesture itself.
+                      onCameraMove: (_) => _refreshPinScreenPositions(),
+                      onCameraIdle: _refreshPinScreenPositions,
                     ),
-                    trackCameraPosition: true,
-                    onMapCreated: _onMapCreated,
-                    onStyleLoadedCallback: _onStyleLoaded,
-                    onMapClick: _handleMapTap,
-                    // onCameraIdle alone only refreshes once a drag/pinch
-                    // gesture finishes, so the pins would sit frozen
-                    // mid-drag and snap into place afterwards —
-                    // onCameraMove fires continuously while the camera is
-                    // moving, keeping them glued to the map during the
-                    // gesture itself.
-                    onCameraMove: (_) => _refreshPinScreenPositions(),
-                    onCameraIdle: _refreshPinScreenPositions,
-                  ),
-                  if (_destination != null)
-                    ScreenMarker(
-                      point: _destinationScreenPoint,
-                      width: 28,
-                      height: 28,
-                      anchor: Alignment.bottomCenter,
-                      child: const Icon(Icons.location_pin, color: AppColors.route, size: 28),
-                    ),
-                  if (_meetup != null)
-                    ScreenMarker(
-                      point: _meetupScreenPoint,
-                      width: 24,
-                      height: 24,
-                      anchor: Alignment.bottomCenter,
-                      child: const Icon(Icons.location_pin, color: AppColors.rust, size: 24),
-                    ),
-                ],
+                    if (_destination != null)
+                      ScreenMarker(
+                        point: _destinationScreenPoint,
+                        width: 28,
+                        height: 28,
+                        anchor: Alignment.bottomCenter,
+                        child: const Icon(Icons.location_pin, color: AppColors.route, size: 28),
+                      ),
+                    if (_meetup != null)
+                      ScreenMarker(
+                        point: _meetupScreenPoint,
+                        width: 24,
+                        height: 24,
+                        anchor: Alignment.bottomCenter,
+                        child: const Icon(Icons.location_pin, color: AppColors.rust, size: 24),
+                      ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 10),
@@ -563,6 +602,31 @@ class _LocationSearchFieldState extends State<_LocationSearchField> {
                 onChanged: _onChanged,
                 style: AppText.body(size: 14, weight: FontWeight.w600),
                 cursorColor: widget.accent,
+                // Turns out the pin-shaped thing that kept appearing over
+                // this field was never our marker code at all — it's
+                // Flutter/Android's native cursor-drag handle, the small
+                // teardrop that appears below the cursor after a tap so you
+                // can drag to reposition it. It's drawn in `cursorColor`
+                // (widget.accent — the same yellow used for the map pin,
+                // which is why they looked identical). Turning off
+                // interactive selection removes that handle; typing,
+                // backspace, and clearing the field all still work fine —
+                // the only things lost are long-press-to-select, copy/paste,
+                // and drag-to-reposition-cursor, which this short one-line
+                // search field doesn't really need.
+                enableInteractiveSelection: false,
+                // These fields hold address-like text ("Tagaytay Ridge,
+                // Cavite"), which is exactly what triggers Android's
+                // platform-level autofill/smart-suggestion service (e.g.
+                // "Autofill with Google") to render its own location-pin
+                // icon over the field. That overlay is drawn by the OS, not
+                // by us — an empty autofillHints list (not null — null lets
+                // the platform decide) tells the engine this field has no
+                // autofill hints to offer, which is what actually opts it
+                // out; enableSuggestions:false additionally suppresses
+                // Gboard's own suggestion-strip entities for the same text.
+                autofillHints: const [],
+                enableSuggestions: false,
                 decoration: InputDecoration(
                   isDense: true,
                   contentPadding: const EdgeInsets.symmetric(vertical: 6),
